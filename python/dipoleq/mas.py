@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+from scipy.integrate import cumulative_trapezoid
 from json2xml.json2xml import Json2xml  # type: ignore[import-untyped]
 
 from ._version import __version__, __version_tuple__
@@ -180,6 +182,8 @@ def add_boundary(m: Machine, ts: DS) -> None:
     bound["outline.z"] = bnd_z
     bound["psi_norm"] = psi_norm
     bound["psi"] = (pg.PsiLim - pg.PsiAxis) * psi_norm + pg.PsiAxis
+    bound["minor_radius"] = (np.max(bnd_r) - np.min(bnd_r)) / 2
+    bound["type"] = 1 if m.is_diverted() else 0
 
 
 def add_boundary_separatrix(m: Machine, ts: DS) -> None:
@@ -243,6 +247,12 @@ def fill_ds(m: Machine, eq: DS, wall: DS, time_index: int | None, time: float) -
     pl = m.Plasma
     pg = m.PsiGrid
 
+    flux_surface_averager = FluxSurfaceAverager(m)
+    r_rmax, z_rmax = flux_surface_averager.rmax()
+    r_zmax, z_zmax = flux_surface_averager.zmax()
+    r_rmin, z_rmin = flux_surface_averager.rmin()
+    r_zmin, z_zmin = flux_surface_averager.zmin()
+
     add_limiters(m, wall)
 
     # add the structure and the wall from the machine
@@ -257,7 +267,44 @@ def fill_ds(m: Machine, eq: DS, wall: DS, time_index: int | None, time: float) -
     # https://imas-data-dictionary.readthedocs.io/en/latest/generated/ids/equilibrium.html
     # https://gafusion.github.io/omas/schema/schema_equilibrium.html
 
-    psi = np.array(pl.Psi_pr)  # flux values, 1d
+    psi = np.asarray(pl.Psi_pr)  # flux values, 1d
+    psi_norm = np.asarray(pl.PsiX_pr)
+
+    # Minor radius, defined as half the difference of minimum and maximum radius of the flux surface
+    a = (r_rmax - r_rmin) / 2
+    # Toroidal field function
+    f = np.asarray(pl.G_pr) * pl.B0R0
+
+    R_grid = np.stack([np.asarray(pg.R)] * len(np.asarray(pg.Z)), axis=0)
+    B2_grid = np.asarray(pl.B2)
+    grad_psi2_grid = np.asarray(pl.GradPsi2)
+    avg_1_over_R = flux_surface_averager.flux_surface_average(1 / R_grid)
+    avg_1_over_R2 = flux_surface_averager.flux_surface_average(1 / R_grid**2)
+    avg_grad_psi = flux_surface_averager.flux_surface_average(np.sqrt(grad_psi2_grid))
+    avg_grad_psi2 = flux_surface_averager.flux_surface_average(grad_psi2_grid)
+    avg_grad_psi2_over_R2 = flux_surface_averager.flux_surface_average(grad_psi2_grid / R_grid**2)
+    avg_grad_psi2_over_B2 = flux_surface_averager.flux_surface_average(grad_psi2_grid / B2_grid)
+
+    # Phi is defined as a double integral of the toroidal magnetic field over the cross-sectional surface contained within the flux contour.
+    dphi_dvol = f / (2 * np.pi) * avg_1_over_R2
+    # For tokamaks, the magnetic axis forms the start of the integral, so the initial Phi is zero.
+    # However, dipoles have a finite FCFS, and it turns out we need to choose a non-zero initial Phi.
+    # The actual value though is fairly unimportant, so we approximate the contained toroidal magnetic flux.
+    phi_0 = np.pi * pl.B0 * a[0]**2
+    phi = cumulative_trapezoid(dphi_dvol, x=np.asarray(pl.Vol_pr), initial=0) + phi_0
+    rho_tor = np.sqrt(phi / (np.pi * pl.B0))
+    drho_dphi = 1 / (2 * np.pi * pl.B0 * rho_tor)
+    dvol_dpsi = np.asarray(pl.Volp_pr)
+
+    drho_dpsi = drho_dphi * dphi_dvol * dvol_dpsi
+
+    avg_grad_rho = drho_dpsi * avg_grad_psi
+    avg_grad_rho2 = drho_dpsi**2 * avg_grad_psi2
+    avg_grad_rho2_over_B2 = drho_dpsi**2 * avg_grad_psi2_over_B2
+    avg_grad_rho2_over_R2 = drho_dpsi**2 * avg_grad_psi2_over_R2
+
+    MU0 = 4.0e-7 * np.pi
+    j_grid = np.asarray(m.PsiGrid.Current) / MU0
 
     # Set the time array
     eqt["time"] = time
@@ -279,30 +326,119 @@ def fill_ds(m: Machine, eq: DS, wall: DS, time_index: int | None, time: float) -
     # 1D quantities
     eq1d = eqt["profiles_1d"]
     eq1d["psi"] = psi
-    eq1d["f"] = np.asarray(pl.G_pr) * pl.B0R0
+    eq1d["psi_norm"] = psi_norm
+    eq1d["phi"] = phi
+    eq1d["pressure"] = np.asarray(pl.P_pr)
+    eq1d["f"] = f
+    eq1d["dpressure_dpsi"] = np.asarray(pl.Pp_pr)
     eq1d["f_df_dpsi"] = np.asarray(pl.G2p_pr) * (pl.B0R0) ** 2
-    eq1d["pressure"] = np.array(pl.P_pr)
-    eq1d["dpressure_dpsi"] = np.array(pl.Pp_pr)
-    eq1d["q"] = np.array(pl.q_pr)
+    eq1d["j_tor"] = flux_surface_averager.flux_surface_average(j_grid / R_grid) / avg_1_over_R
+    eq1d["q"] = np.asarray(pl.q_pr)
+    eq1d["r_inboard"] = r_rmin
+    eq1d["r_outboard"] = r_rmax
+    eq1d["rho_tor"] = rho_tor
+    eq1d["rho_tor_norm"] = (rho_tor - rho_tor[0]) / (rho_tor[-1] - rho_tor[0])
+    eq1d["elongation"] = (r_zmax - r_zmin) / (r_rmax - r_rmin)
+    eq1d["triangularity_upper"] = (pl.R0 - r_zmax) / a
+    eq1d["triangularity_lower"] = (pl.R0 - r_zmin) / a
+    eq1d["volume"] = np.asarray(pl.Vol_pr)
+    eq1d["dvolume_dpsi"] = dvol_dpsi
+    eq1d["dvolume_drho_tor"] = dvol_dpsi / drho_dpsi
+    eq1d["gm1"] = avg_1_over_R2
+    eq1d["gm2"] = avg_grad_rho2_over_R2
+    eq1d["gm3"] = avg_grad_rho2
+    eq1d["gm4"] = flux_surface_averager.flux_surface_average(1 / B2_grid)
+    eq1d["gm5"] = flux_surface_averager.flux_surface_average(B2_grid)
+    eq1d["gm6"] = avg_grad_rho2_over_B2
+    eq1d["gm7"] = avg_grad_rho
+    eq1d["gm8"] = flux_surface_averager.flux_surface_average(R_grid)
+    eq1d["gm9"] = avg_1_over_R
 
     # 2D quantities
-    MU0 = 4.0e-7 * 3.14159265358979323846
     eq2d = eqt["profiles_2d.0"]
     eq2d["type.index"] = 0  # total fields.. could also be broken down into components
     eq2d["grid_type.index"] = 1  # regular R,Z grid
     eq2d["grid_type.name"] = "RZ"
-    eq2d["grid.dim1"] = R = np.array(m.PsiGrid.R)
-    eq2d["grid.dim2"] = np.array(m.PsiGrid.Z)
-    eq2d["psi"] = np.array(m.PsiGrid.Psi)
-    eq2d["j_tor"] = np.asarray(m.PsiGrid.Current) / MU0
-    eq2d["b_field_r"] = np.asarray(pl.GradPsiZ) / (2 * np.pi * R)
-    eq2d["b_field_z"] = -np.asarray(pl.GradPsiR) / (2 * np.pi * R)
-    eq2d["b_field_tor"] = np.array(pl.Bt)
+    eq2d["grid.dim1"] = np.asarray(m.PsiGrid.R)
+    eq2d["grid.dim2"] = np.asarray(m.PsiGrid.Z)
+    eq2d["psi"] = np.asarray(m.PsiGrid.Psi)
+    eq2d["j_tor"] = j_grid
+    eq2d["b_field_r"] = np.asarray(pl.GradPsiZ) / (2 * np.pi * R_grid)
+    eq2d["b_field_z"] = -np.asarray(pl.GradPsiR) / (2 * np.pi * R_grid)
+    eq2d["b_field_tor"] = np.asarray(pl.Bt)
     # others to add
     # eq2d['grid.volume_element']
-    # eq2d['phi']   # the toroidal flux
 
     # boundaries
     add_boundary(m, eqt)
     add_boundary_separatrix(m, eqt)
     add_inner_boundary_separatrix(m, eqt)
+
+
+class FluxSurfaceAverager:
+    """
+    Class to handle flux surface averaging of quantities defined on the PsiGrid.
+    It can also calculate the extrema of each flux surface, giving the (R, Z) coordinates of the four extrema (min R, max R, min Z, max Z).
+    """
+    m: Machine
+    contours: list[tuple[float, np.ndarray, np.ndarray]]  # list of (r, z) arrays for each flux surface
+    arc_length_coords: list[np.ndarray]
+    B_p: list[np.ndarray]
+
+    def __init__(self, m: Machine) -> None:
+        self.m = m
+        self.make_contours()
+
+    def make_contours(self):
+        self.contours = [(psi_n, *self.pg.get_contour(psi_n)) for psi_n in np.asarray(self.pl.PsiX_pr)]
+
+        self.B_p = self.grid_to_flux(np.sqrt(self.pl.B2))
+        dR = [np.gradient(R) for _, R, _ in self.contours]
+        dZ = [np.gradient(Z) for _, _, Z in self.contours]
+        dl = [np.hypot(dr, dz) for dr, dz in zip(dR, dZ)]
+        self.arc_length_coords = [np.cumsum(dl_row) for dl_row in dl]
+
+    @property
+    def pg(self):
+        return self.m.PsiGrid
+
+    @property
+    def pl(self):
+        return self.m.Plasma
+
+    def grid_to_flux(self, quantity: np.ndarray) -> list[np.ndarray]:
+        interp = RegularGridInterpolator((np.asarray(self.pg.Z), np.asarray(self.pg.R)), quantity)
+        return [
+            interp((z, r)) for _, r, z in self.contours
+        ]
+
+    def flux_surface_average(self, quantity: np.ndarray) -> np.ndarray:
+        return self.flux_surface_average_flux_quantity(self.grid_to_flux(quantity))
+
+    def flux_surface_average_flux_quantity(self, quantity: list[np.ndarray]) -> np.ndarray:
+        # TODO: Assert on the shape of the quantity
+        flux_integrals = [
+            np.trapezoid(quantity / bp, x=arc_length)
+            for quantity, bp, arc_length in zip(quantity, self.B_p, self.arc_length_coords)
+        ]
+        return np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
+
+    def rmin(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.coord_extrema(np.argmin, 0)
+
+    def zmin(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.coord_extrema(np.argmin, 1)
+
+    def rmax(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.coord_extrema(np.argmax, 0)
+
+    def zmax(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.coord_extrema(np.argmax, 1)
+
+    def coord_extrema(self, extrema_func, coord_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        assert coord_idx in (0, 1), "coord_idx must be 0 for R or 1 for Z"
+        arg_extrema = [(extrema_func([R, Z][coord_idx]), R, Z) for _, R, Z in self.contours]
+        return (
+            np.array([R[arg_extrema] for arg_extrema, R, _ in arg_extrema]),
+            np.array([Z[arg_extrema] for arg_extrema, _, Z in arg_extrema]),
+        )
