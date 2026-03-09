@@ -3,9 +3,11 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
-from scipy.integrate import cumulative_trapezoid
+from numpy.typing import NDArray
 from json2xml.json2xml import Json2xml  # type: ignore[import-untyped]
+from scipy.integrate import cumulative_trapezoid
+from scipy.interpolate import RegularGridInterpolator
+from .core import Plasma, PsiGrid
 
 from ._version import __version__, __version_tuple__
 from .input import MachineIn
@@ -282,15 +284,19 @@ def fill_ds(m: Machine, eq: DS, wall: DS, time_index: int | None, time: float) -
     avg_1_over_R2 = flux_surface_averager.flux_surface_average(1 / R_grid**2)
     avg_grad_psi = flux_surface_averager.flux_surface_average(np.sqrt(grad_psi2_grid))
     avg_grad_psi2 = flux_surface_averager.flux_surface_average(grad_psi2_grid)
-    avg_grad_psi2_over_R2 = flux_surface_averager.flux_surface_average(grad_psi2_grid / R_grid**2)
-    avg_grad_psi2_over_B2 = flux_surface_averager.flux_surface_average(grad_psi2_grid / B2_grid)
+    avg_grad_psi2_over_R2 = flux_surface_averager.flux_surface_average(
+        grad_psi2_grid / R_grid**2
+    )
+    avg_grad_psi2_over_B2 = flux_surface_averager.flux_surface_average(
+        grad_psi2_grid / B2_grid
+    )
 
     # Phi is defined as a double integral of the toroidal magnetic field over the cross-sectional surface contained within the flux contour.
     dphi_dvol = f / (2 * np.pi) * avg_1_over_R2
     # For tokamaks, the magnetic axis forms the start of the integral, so the initial Phi is zero.
     # However, dipoles have a finite FCFS, and it turns out we need to choose a non-zero initial Phi.
     # The actual value though is fairly unimportant, so we approximate the contained toroidal magnetic flux.
-    phi_0 = np.pi * pl.B0 * a[0]**2
+    phi_0 = np.pi * pl.B0 * a[0] ** 2
     phi = cumulative_trapezoid(dphi_dvol, x=np.asarray(pl.Vol_pr), initial=0) + phi_0
     rho_tor = np.sqrt(phi / (np.pi * pl.B0))
     drho_dphi = 1 / (2 * np.pi * pl.B0 * rho_tor)
@@ -332,7 +338,9 @@ def fill_ds(m: Machine, eq: DS, wall: DS, time_index: int | None, time: float) -
     eq1d["f"] = f
     eq1d["dpressure_dpsi"] = np.asarray(pl.Pp_pr)
     eq1d["f_df_dpsi"] = np.asarray(pl.G2p_pr) * (pl.B0R0) ** 2
-    eq1d["j_tor"] = flux_surface_averager.flux_surface_average(j_grid / R_grid) / avg_1_over_R
+    eq1d["j_tor"] = (
+        flux_surface_averager.flux_surface_average(j_grid / R_grid) / avg_1_over_R
+    )
     eq1d["q"] = np.asarray(pl.q_pr)
     eq1d["r_inboard"] = r_rmin
     eq1d["r_outboard"] = r_rmax
@@ -380,64 +388,78 @@ class FluxSurfaceAverager:
     Class to handle flux surface averaging of quantities defined on the PsiGrid.
     It can also calculate the extrema of each flux surface, giving the (R, Z) coordinates of the four extrema (min R, max R, min Z, max Z).
     """
+
     m: Machine
-    contours: list[tuple[float, np.ndarray, np.ndarray]]  # list of (r, z) arrays for each flux surface
-    arc_length_coords: list[np.ndarray]
-    B_p: list[np.ndarray]
+    contours: list[
+        tuple[float, NDArray[np.float64], NDArray[np.float64]]
+    ]  # list of (r, z) arrays for each flux surface
+    arc_length_coords: list[NDArray[np.float64]]
+    B_p: list[NDArray[np.float64]]
 
     def __init__(self, m: Machine) -> None:
         self.m = m
         self.make_contours()
 
-    def make_contours(self):
-        self.contours = [(psi_n, *self.pg.get_contour(psi_n)) for psi_n in np.asarray(self.pl.PsiX_pr)]
+    def make_contours(self) -> None:
+        self.contours = [
+            (psi_n, *self.pg.get_contour(psi_n))
+            for psi_n in np.asarray(self.pl.PsiX_pr)
+        ]
 
         self.B_p = self.grid_to_flux(np.sqrt(self.pl.B2))
         dR = [np.gradient(R) for _, R, _ in self.contours]
         dZ = [np.gradient(Z) for _, _, Z in self.contours]
-        dl = [np.hypot(dr, dz) for dr, dz in zip(dR, dZ)]
+        dl = [np.hypot(dr, dz) for dr, dz in zip(dR, dZ, strict=True)]
         self.arc_length_coords = [np.cumsum(dl_row) for dl_row in dl]
 
     @property
-    def pg(self):
+    def pg(self) -> PsiGrid:
         return self.m.PsiGrid
 
     @property
-    def pl(self):
+    def pl(self) -> Plasma:
         return self.m.Plasma
 
-    def grid_to_flux(self, quantity: np.ndarray) -> list[np.ndarray]:
-        interp = RegularGridInterpolator((np.asarray(self.pg.Z), np.asarray(self.pg.R)), quantity)
-        return [
-            interp((z, r)) for _, r, z in self.contours
-        ]
+    def grid_to_flux(self, quantity: NDArray[np.float64]) -> list[NDArray[np.float64]]:
+        interp = RegularGridInterpolator(
+            (np.asarray(self.pg.Z), np.asarray(self.pg.R)), quantity
+        )
+        return [interp((z, r)) for _, r, z in self.contours]
 
-    def flux_surface_average(self, quantity: np.ndarray) -> np.ndarray:
+    def flux_surface_average(self, quantity: NDArray[np.float64]) -> NDArray[np.float64]:
         return self.flux_surface_average_flux_quantity(self.grid_to_flux(quantity))
 
-    def flux_surface_average_flux_quantity(self, quantity: list[np.ndarray]) -> np.ndarray:
+    def flux_surface_average_flux_quantity(
+        self, quantity: list[NDArray[np.float64]]
+    ) -> NDArray[np.float64]:
         # TODO: Assert on the shape of the quantity
         flux_integrals = [
             np.trapezoid(quantity / bp, x=arc_length)
-            for quantity, bp, arc_length in zip(quantity, self.B_p, self.arc_length_coords)
+            for quantity, bp, arc_length in zip(
+                quantity, self.B_p, self.arc_length_coords
+            )
         ]
         return np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
 
-    def rmin(self) -> tuple[np.ndarray, np.ndarray]:
+    def rmin(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         return self.coord_extrema(np.argmin, 0)
 
-    def zmin(self) -> tuple[np.ndarray, np.ndarray]:
+    def zmin(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         return self.coord_extrema(np.argmin, 1)
 
-    def rmax(self) -> tuple[np.ndarray, np.ndarray]:
+    def rmax(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         return self.coord_extrema(np.argmax, 0)
 
-    def zmax(self) -> tuple[np.ndarray, np.ndarray]:
+    def zmax(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         return self.coord_extrema(np.argmax, 1)
 
-    def coord_extrema(self, extrema_func, coord_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    def coord_extrema(
+        self, extrema_func, coord_idx: int
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         assert coord_idx in (0, 1), "coord_idx must be 0 for R or 1 for Z"
-        arg_extrema = [(extrema_func([R, Z][coord_idx]), R, Z) for _, R, Z in self.contours]
+        arg_extrema = [
+            (extrema_func([R, Z][coord_idx]), R, Z) for _, R, Z in self.contours
+        ]
         return (
             np.array([R[arg_extrema] for arg_extrema, R, _ in arg_extrema]),
             np.array([Z[arg_extrema] for arg_extrema, _, Z in arg_extrema]),
