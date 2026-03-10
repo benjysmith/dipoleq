@@ -1,4 +1,5 @@
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -185,7 +186,7 @@ def add_boundary(m: Machine, ts: DS) -> None:
     bound["psi_norm"] = psi_norm
     bound["psi"] = (pg.PsiLim - pg.PsiAxis) * psi_norm + pg.PsiAxis
     bound["minor_radius"] = (np.max(bnd_r) - np.min(bnd_r)) / 2
-    bound["type"] = 1 if m.is_diverted() else 0
+    bound["type"] = 1 if m.is_diverted() else 0  # type: ignore[attr-defined]
 
 
 def add_boundary_separatrix(m: Machine, ts: DS) -> None:
@@ -435,7 +436,7 @@ class FluxSurfaceAverager:
         self, quantity: list[NDArray[np.float64]]
     ) -> NDArray[np.float64]:
         # TODO: Assert on the shape of the quantity
-        flux_integrals = [
+        flux_integrals: list[np.float64] = [  # type: ignore
             np.trapezoid(quantity / bp, x=arc_length)
             for quantity, bp, arc_length in zip(
                 quantity, self.B_p, self.arc_length_coords, strict=True
@@ -456,7 +457,7 @@ class FluxSurfaceAverager:
         return self.coord_extrema(np.argmax, 1)
 
     def coord_extrema(
-        self, extrema_func, coord_idx: int
+        self, extrema_func: Callable[[NDArray[np.float64]], int], coord_idx: int
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         assert coord_idx in (0, 1), "coord_idx must be 0 for R or 1 for Z"
         arg_extrema = [
