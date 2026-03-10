@@ -437,12 +437,14 @@ class FluxSurfaceAverager:
     ) -> NDArray[np.float64]:
         # TODO: Assert on the shape of the quantity
         flux_integrals: list[np.float64] = [
-            np.trapezoid(quantity / bp, x=arc_length)  # type: ignore
+            np.trapezoid(quantity / bp, x=arc_length)  # type: ignore[misc]
             for quantity, bp, arc_length in zip(
                 quantity, self.B_p, self.arc_length_coords, strict=True
             )
         ]
-        average: NDArray[np.float64] = np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
+        average: NDArray[np.float64] = np.array(flux_integrals) / np.asarray(
+            self.pl.Volp_pr
+        )
         return average
 
     def rmin(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
