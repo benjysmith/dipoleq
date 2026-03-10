@@ -3,13 +3,13 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 from json2xml.json2xml import Json2xml  # type: ignore[import-untyped]
+from numpy.typing import NDArray
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import RegularGridInterpolator
-from .core import Plasma, PsiGrid
 
 from ._version import __version__, __version_tuple__
+from .core import Plasma, PsiGrid
 from .input import MachineIn
 from .post_process import Machine
 from .util import is_polygon_closed
@@ -426,7 +426,9 @@ class FluxSurfaceAverager:
         )
         return [interp((z, r)) for _, r, z in self.contours]
 
-    def flux_surface_average(self, quantity: NDArray[np.float64]) -> NDArray[np.float64]:
+    def flux_surface_average(
+        self, quantity: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         return self.flux_surface_average_flux_quantity(self.grid_to_flux(quantity))
 
     def flux_surface_average_flux_quantity(
@@ -436,7 +438,7 @@ class FluxSurfaceAverager:
         flux_integrals = [
             np.trapezoid(quantity / bp, x=arc_length)
             for quantity, bp, arc_length in zip(
-                quantity, self.B_p, self.arc_length_coords
+                quantity, self.B_p, self.arc_length_coords, strict=True
             )
         ]
         return np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
