@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -436,13 +436,14 @@ class FluxSurfaceAverager:
         self, quantity: list[NDArray[np.float64]]
     ) -> NDArray[np.float64]:
         # TODO: Assert on the shape of the quantity
-        flux_integrals: list[np.float64] = [  # type: ignore
-            np.trapezoid(quantity / bp, x=arc_length)
+        flux_integrals: list[np.float64] = [
+            np.trapezoid(quantity / bp, x=arc_length)  # type: ignore
             for quantity, bp, arc_length in zip(
                 quantity, self.B_p, self.arc_length_coords, strict=True
             )
         ]
-        return np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
+        average: NDArray[np.float64] = np.array(flux_integrals) / np.asarray(self.pl.Volp_pr)
+        return average
 
     def rmin(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         return self.coord_extrema(np.argmin, 0)
